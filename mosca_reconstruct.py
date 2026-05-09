@@ -721,6 +721,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("MoSca-V2 Reconstruction")
     parser.add_argument("--ws", type=str, help="Source folder", required=True)
     parser.add_argument("--cfg", type=str, help="profile yaml file path", required=True)
+    parser.add_argument(
+        "--log_root",
+        type=str,
+        default="logs",
+        help="Root directory for reconstruction outputs. Relative paths are created under --ws; absolute paths are used as-is.",
+    )
     parser.add_argument("--no_viz", action="store_true", help="no viz")
     args, unknown = parser.parse_known_args()
 
@@ -728,7 +734,7 @@ if __name__ == "__main__":
     cli_cfg = OmegaConf.from_dotlist([arg.lstrip("--") for arg in unknown])
     cfg = OmegaConf.merge(cfg, cli_cfg)
 
-    logdir = setup_recon_ws(args.ws, fit_cfg=cfg)
+    logdir = setup_recon_ws(args.ws, fit_cfg=cfg, logdir=args.log_root)
 
     # * RUN
     static_reconstruct(args.ws, logdir, cfg)

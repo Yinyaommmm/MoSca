@@ -38,6 +38,13 @@ import jax.numpy as jnp
 import jax.scipy as jsp
 
 
+def _get_jax_device(local_rank: int = 0):
+    try:
+        return jax.devices("gpu")[local_rank]
+    except RuntimeError:
+        return jax.devices("cpu")[0]
+
+
 def masked_mean(
     x: Union[np.ndarray, jnp.ndarray],
     mask: Optional[Union[np.ndarray, jnp.ndarray]] = None,
@@ -82,10 +89,7 @@ def compute_psnr(
     Returns:
         jnp.ndarray: PSNR in dB of shape ().
     """
-    if torch.cuda.is_available():
-        tmp_device = jax.devices("gpu")[local_rank]
-    else:
-        tmp_deivce = jax.devices("cpu")[0]
+    tmp_device = _get_jax_device(local_rank)
 
     with jax.default_device(tmp_device):
         mse = (img0 - img1) ** 2
@@ -133,10 +137,7 @@ def compute_ssim(
     Returns:
         jnp.ndarray: SSIM in range [0, 1] of shape ().
     """
-    if torch.cuda.is_available():
-        tmp_device = jax.devices("gpu")[local_rank]
-    else:
-        tmp_device = jax.devices("cpu")[0]
+    tmp_device = _get_jax_device(local_rank)
 
     with jax.default_device(tmp_device):
         if mask is None:
