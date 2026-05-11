@@ -7,6 +7,10 @@ import kornia
 from omegaconf import OmegaConf
 
 from lib_prior.prior_loading import Saved2D
+from lib_prior.dynamic_mask_utils import (
+    combine_dynamic_masks,
+    load_external_dynamic_masks_from_cfg,
+)
 
 from lib_render.render_helper import GS_BACKEND
 
@@ -60,6 +64,15 @@ def get_static_render_error_mask(s2d, log_path, render_error_th, open_ksize=-1):
     return render_error_mask
 
 
+def save_dynamic_mask_viz(mask, s2d, log_path, fn):
+    viz = mask.to(s2d.rgb.device).bool()[..., None] * s2d.rgb
+    imageio.mimsave(osp.join(log_path, fn), (viz.cpu().numpy() * 255).astype(np.uint8))
+
+
+def get_external_dynamic_mask_mode(cfg, key, default="replace"):
+    return getattr(cfg, key, getattr(cfg, "dynamic_mask_mode", default))
+
+
 def photometric_warmup(ws, log_path, fit_cfg):
     seed_everything(SEED)
     # ! here the warup do not need to start from low opa, only when mix two component we start from low opa!
@@ -91,7 +104,27 @@ def photometric_warmup(ws, log_path, fit_cfg):
         .load_vos()
         .to(device)
     )
-    s2d = set_epi_mask_to_s2d_for_bg_render(s2d, EPI_TH, device)
+    external_dynamic_mask = load_external_dynamic_masks_from_cfg(
+        ws, s2d, fit_cfg, device=device, prefix="photo_warm_"
+    )
+    if external_dynamic_mask is not None:
+        mask_mode = get_external_dynamic_mask_mode(
+            fit_cfg, "photo_warm_dynamic_mask_mode"
+        )
+        if str(mask_mode).lower() == "replace":
+            warm_dyn_mask = external_dynamic_mask
+        else:
+            s2d = set_epi_mask_to_s2d_for_bg_render(s2d, EPI_TH, device)
+            warm_dyn_mask = combine_dynamic_masks(
+                s2d.dyn_mask.bool(), external_dynamic_mask, mask_mode
+            )
+        logging.info(f"Use external dynamic mask for static warmup, mode={mask_mode}")
+        s2d.register_2d_identification(
+            static_2d_mask=~warm_dyn_mask, dynamic_2d_mask=warm_dyn_mask
+        )
+        save_dynamic_mask_viz(warm_dyn_mask, s2d, log_path, "external_dynamic_mask_warmup.gif")
+    else:
+        s2d = set_epi_mask_to_s2d_for_bg_render(s2d, EPI_TH, device)
     cams: MonocularCameras = MonocularCameras.load_from_ckpt(
         torch.load(osp.join(log_path, "bundle", "bundle_cams.pth"))
     ).to(device)
@@ -228,6 +261,13 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
         .load_vos()
         .to(device)
     )
+    external_dynamic_mask = load_external_dynamic_masks_from_cfg(
+        ws, s2d, fit_cfg, device=device, prefix="scaffold_"
+    )
+    if external_dynamic_mask is not None:
+        save_dynamic_mask_viz(
+            external_dynamic_mask, s2d, log_path, "external_dynamic_mask_scaffold.gif"
+        )
 
     # re-identify the static and dynamic regions
     consider_photo_error_dyn_id_th = getattr(
@@ -242,6 +282,29 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
         )
     else:
         photo_error_masks = None
+    photo_error_mode = getattr(fit_cfg, "consider_photo_error_dyn_id_mode", "and")
+    photo_error_id_cnt = getattr(
+        fit_cfg, "consider_photo_error_dyn_id_cnt", DYN_ID_CNT
+    )
+    if external_dynamic_mask is not None and getattr(
+        fit_cfg, "dynamic_mask_use_for_track_identification", True
+    ):
+        if photo_error_masks is None:
+            photo_error_masks = external_dynamic_mask
+        else:
+            photo_error_masks = combine_dynamic_masks(
+                photo_error_masks, external_dynamic_mask, "or"
+            )
+        photo_error_mode = getattr(
+            fit_cfg, "dynamic_mask_track_identification_mode", "or"
+        )
+        photo_error_id_cnt = getattr(
+            fit_cfg, "dynamic_mask_track_identification_cnt", 2
+        )
+        logging.info(
+            "Use external dynamic mask as track identification cue: "
+            f"mode={photo_error_mode}, cnt={photo_error_id_cnt}"
+        )
 
     s2d = update_s2d_track_identification(
         s2d,
@@ -250,10 +313,8 @@ def scaffold_reconstruct(ws, log_path, fit_cfg):
         DYN_ID_CNT,
         min_curve_num=getattr(fit_cfg, "min_curve_num", 32),
         photo_error_masks=photo_error_masks,
-        photo_error_mode=getattr(fit_cfg, "consider_photo_error_dyn_id_mode", "and"),
-        photo_error_id_cnt=getattr(
-            fit_cfg, "consider_photo_error_dyn_id_cnt", DYN_ID_CNT
-        ),
+        photo_error_mode=photo_error_mode,
+        photo_error_id_cnt=photo_error_id_cnt,
     )
     np.savez(
         osp.join(log_path, "track_identification.npz"),
@@ -483,6 +544,13 @@ def photometric_reconstruct(ws, log_path, fit_cfg):
         .load_flow()
         .to(device)
     )
+    external_dynamic_mask = load_external_dynamic_masks_from_cfg(
+        ws, s2d, fit_cfg, device=device, prefix="photo_"
+    )
+    if external_dynamic_mask is not None:
+        save_dynamic_mask_viz(
+            external_dynamic_mask, s2d, log_path, "external_dynamic_mask_photo.gif"
+        )
     track_identification = np.load(osp.join(log_path, "track_identification.npz"))
     s2d.register_track_indentification(
         torch.from_numpy(track_identification["static_track_mask"]).to(device),
@@ -513,7 +581,13 @@ def photometric_reconstruct(ws, log_path, fit_cfg):
     )
     # ! warning, this mask is only useful for constructing the model.
     photo_solver.identify_fg_mask_by_nearest_curve(
-        s2d, cams, "gs_model_construct_fg_mask.mp4"
+        s2d,
+        cams,
+        "gs_model_construct_fg_mask.mp4",
+        external_fg_mask=external_dynamic_mask,
+        external_mask_mode=get_external_dynamic_mask_mode(
+            fit_cfg, "photo_dynamic_mask_mode"
+        ),
     )
     if GS_BACKEND == "gof":
         photo_solver.compute_normals_for_s2d(

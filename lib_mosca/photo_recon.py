@@ -23,6 +23,7 @@ from camera import MonocularCameras
 from photo_recon_utils import fetch_leaves_in_world_frame, estimate_normal_map
 from lib_render.render_helper import GS_BACKEND, render, RGB2SH
 from lib_prior.prior_loading import Saved2D
+from lib_prior.dynamic_mask_utils import combine_dynamic_masks
 from gs_utils.gs_optim_helper import update_learning_rate
 from gs_utils.loss_helper import (
     compute_rgb_loss,
@@ -98,50 +99,79 @@ class DynReconstructionSolver:
 
     @torch.no_grad()
     def identify_fg_mask_by_nearest_curve(
-        self, s2d: Saved2D, cams: MonocularCameras, viz_fname=None
+        self,
+        s2d: Saved2D,
+        cams: MonocularCameras,
+        viz_fname=None,
+        external_fg_mask=None,
+        external_mask_mode="replace",
     ):
-        # get global anchor
-        curve_xyz, curve_mask, _, _ = get_dynamic_curves(
-            s2d, cams, return_all_curves=True
-        )
-        assert curve_xyz.shape[1] == len(s2d.dynamic_track_mask)
+        if external_fg_mask is not None:
+            external_fg_mask = external_fg_mask.to(cams.rel_focal.device).bool()
+            assert external_fg_mask.shape == s2d.dep_mask.shape, (
+                external_fg_mask.shape,
+                s2d.dep_mask.shape,
+            )
 
-        # only consider the valid case
-        static_curve_mean = (
-            curve_xyz[:, ~s2d.dynamic_track_mask]
-            * curve_mask[:, ~s2d.dynamic_track_mask, None]
-        ).sum(0, keepdim=True) / curve_mask[:, ~s2d.dynamic_track_mask, None].sum(
-            0, keepdim=True
-        ).expand(
-            len(curve_xyz), -1, -1
-        )
-        curve_xyz[:, ~s2d.dynamic_track_mask] = static_curve_mean
-        np.savetxt(
-            osp.join(self.viz_dir, "fg_id_non_dyn_curve_meaned.xyz"),
-            static_curve_mean.reshape(-1, 3).cpu().numpy(),
-            fmt="%.4f",
-        )
+        if external_fg_mask is not None and str(external_mask_mode).lower() == "replace":
+            logging.info("Use external dynamic mask as fg mask for GS construction")
+            fg_mask_list = external_fg_mask.detach().cpu()
+        else:
+            # get global anchor
+            curve_xyz, curve_mask, _, _ = get_dynamic_curves(
+                s2d, cams, return_all_curves=True
+            )
+            assert curve_xyz.shape[1] == len(s2d.dynamic_track_mask)
 
-        with torch.no_grad():
-            fg_mask_list = []
-            for query_tid in tqdm(range(s2d.T)):
-                query_dep = s2d.dep[query_tid].clone()  # H,W
-                query_xyz_cam = cams.backproject(
-                    cams.get_homo_coordinate_map(), query_dep
+            # only consider the valid case
+            static_curve_mean = (
+                curve_xyz[:, ~s2d.dynamic_track_mask]
+                * curve_mask[:, ~s2d.dynamic_track_mask, None]
+            ).sum(0, keepdim=True) / curve_mask[:, ~s2d.dynamic_track_mask, None].sum(
+                0, keepdim=True
+            ).expand(
+                len(curve_xyz), -1, -1
+            )
+            curve_xyz[:, ~s2d.dynamic_track_mask] = static_curve_mean
+            np.savetxt(
+                osp.join(self.viz_dir, "fg_id_non_dyn_curve_meaned.xyz"),
+                static_curve_mean.reshape(-1, 3).cpu().numpy(),
+                fmt="%.4f",
+            )
+
+            with torch.no_grad():
+                fg_mask_list = []
+                for query_tid in tqdm(range(s2d.T)):
+                    query_dep = s2d.dep[query_tid].clone()  # H,W
+                    query_xyz_cam = cams.backproject(
+                        cams.get_homo_coordinate_map(), query_dep
+                    )
+                    query_xyz_world = cams.trans_pts_to_world(
+                        query_tid, query_xyz_cam
+                    )  # H,W,3
+
+                    # find the nearest distance and acc sk weight
+                    # use all the curve at this position to id the fg and bg
+                    _, knn_id, _ = knn_points(
+                        query_xyz_world.reshape(1, -1, 3),
+                        curve_xyz[query_tid][None],
+                        K=1,
+                    )
+                    knn_id = knn_id[0, :, 0]
+                    fg_mask = s2d.dynamic_track_mask[knn_id].reshape(s2d.H, s2d.W)
+                    fg_mask_list.append(fg_mask.cpu())
+                fg_mask_list = torch.stack(fg_mask_list, 0)
+            if external_fg_mask is not None:
+                logging.info(
+                    f"Combine nearest-curve fg mask with external dynamic mask, "
+                    f"mode={external_mask_mode}"
                 )
-                query_xyz_world = cams.trans_pts_to_world(
-                    query_tid, query_xyz_cam
-                )  # H,W,3
-
-                # find the nearest distance and acc sk weight
-                # use all the curve at this position to id the fg and bg
-                _, knn_id, _ = knn_points(
-                    query_xyz_world.reshape(1, -1, 3), curve_xyz[query_tid][None], K=1
+                fg_mask_list = combine_dynamic_masks(
+                    fg_mask_list.to(external_fg_mask.device),
+                    external_fg_mask,
+                    external_mask_mode,
                 )
-                knn_id = knn_id[0, :, 0]
-                fg_mask = s2d.dynamic_track_mask[knn_id].reshape(s2d.H, s2d.W)
-                fg_mask_list.append(fg_mask.cpu())
-            fg_mask_list = torch.stack(fg_mask_list, 0)
+                fg_mask_list = fg_mask_list.detach().cpu()
         if viz_fname is not None:
             viz_rgb = s2d.rgb.clone().cpu()
             viz_fg_mask_list = fg_mask_list * s2d.dep_mask.to(fg_mask_list)

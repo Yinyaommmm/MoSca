@@ -1,25 +1,25 @@
-# Planned Modification: SAM3-Guided Dynamic Masks for DyCheck
+# 计划：使用 SAM3 引导 DyCheck 动态掩码改进 MoSca
 
-## Motivation
+## 动机
 
-MoSca currently separates static and dynamic regions mainly through epipolar inconsistency and track-level motion cues. This is useful for discovering motion, but the derived pixel-level dynamic masks can be noisy:
+MoSca 当前主要依赖极几何不一致性和 track 级运动线索来区分静态区域与动态区域。这种方式适合发现运动，但由它生成的像素级动态掩码可能比较噪声：
 
-- Static background such as floor regions may be included as dynamic due to depth, optical-flow, camera-pose, or occlusion errors.
-- Moving objects can be incomplete because track coverage is sparse and pixel masks are expanded from nearest dynamic curves.
-- Thin structures, occlusions, and reappearing object parts are especially unstable.
+- 地面等静态背景可能因为深度、光流、相机位姿或遮挡误差被误判为动态区域。
+- 运动物体可能因为 track 覆盖稀疏、像素级 mask 从动态曲线最近邻扩展而出现残缺。
+- 细长结构、遮挡区域、重新出现的物体部分尤其容易不稳定。
 
-DyCheck scenes usually have clear dynamic subjects. This makes them suitable for prompt-based video segmentation, where SAM3 can be used to produce cleaner object-level masks for the moving subjects.
+DyCheck 场景里的动态主体通常比较明确，因此适合使用 prompt-based 视频分割。SAM3 可以用来生成更干净、更完整的运动主体物体级掩码。
 
-## Proposed Direction
+## 总体方向
 
-Use SAM3 as an object-boundary refinement and propagation module, not as the only source of motion reasoning.
+SAM3 应该作为物体边界补全和时序传播模块使用，而不是作为唯一的运动判断来源。
 
-The intended workflow is:
+计划流程如下：
 
-1. For each DyCheck sequence, choose one or more keyframes.
-2. Provide prompts for the dynamic subject or subjects in those keyframes.
-3. Run SAM3 video segmentation to propagate masks across the sequence.
-4. Save the propagated masks under each sequence, for example:
+1. 对每个 DyCheck sequence 选择一个或多个关键帧。
+2. 在关键帧上对动态主体提供 prompt。
+3. 使用 SAM3 视频分割，将动态主体掩码传播到整个视频序列。
+4. 将传播后的掩码保存到对应 sequence 下，例如：
 
    ```text
    <sequence>/
@@ -29,70 +29,70 @@ The intended workflow is:
        ...
    ```
 
-5. Modify MoSca data loading or reconstruction code so `dynamic_mask_sam3` can replace or refine the default `s2d.dyn_mask`.
+5. 修改 MoSca 的数据读取或重建代码，使 `dynamic_mask_sam3` 可以替换或修正默认的 `s2d.dyn_mask`。
 
-## Integration Options
+## 接入方案
 
-### Option A: Replace Pixel-Level Dynamic Mask
+### 方案 A：直接替换像素级动态掩码
 
-Use SAM3 masks directly as `s2d.dyn_mask` during Gaussian initialization:
+在 Gaussian 初始化阶段，直接将 SAM3 掩码作为 `s2d.dyn_mask`：
 
-- Static GS initialization uses `~sam3_mask * dep_mask`.
-- Dynamic GS initialization uses `sam3_mask * dep_mask`.
+- 静态 GS 初始化使用 `~sam3_mask * dep_mask`。
+- 动态 GS 初始化使用 `sam3_mask * dep_mask`。
 
-This is simple and likely improves object boundaries, but it relies heavily on prompt quality.
+这个方案最简单，也最可能改善物体边界，但效果高度依赖 prompt 质量。
 
-### Option B: SAM3 Mask Plus EPI Sanity Filter
+### 方案 B：SAM3 掩码结合 EPI 过滤
 
-Combine SAM3 and MoSca's EPI-derived mask:
+将 SAM3 掩码与 MoSca 的 EPI 动态掩码结合：
 
-- Conservative mode: `dynamic = sam3_mask & epi_dyn_mask`
-- Complete mode: `dynamic = sam3_mask | epi_dyn_mask`
-- Preferred initial experiment: use `sam3_mask` as the main mask and keep EPI masks for visualization and diagnostics.
+- 保守模式：`dynamic = sam3_mask & epi_dyn_mask`
+- 完整模式：`dynamic = sam3_mask | epi_dyn_mask`
+- 首轮实验建议：以 `sam3_mask` 作为主掩码，同时保留 EPI 掩码用于可视化和诊断。
 
-This preserves motion evidence while allowing SAM3 to provide cleaner object boundaries.
+这个方案既保留了运动几何线索，也允许 SAM3 提供更完整的物体边界。
 
-### Option C: Soft Auxiliary Mask
+### 方案 C：作为软辅助监督
 
-Instead of hard replacing `s2d.dyn_mask`, keep MoSca's original mask but add a soft consistency loss encouraging the rendered dynamic/static separation to agree with SAM3.
+不直接硬替换 `s2d.dyn_mask`，而是保留 MoSca 原始动态掩码，同时增加一个 soft consistency loss，鼓励渲染出的动静分离结果与 SAM3 掩码一致。
 
-This is safer for training but requires more code changes.
+这个方案训练风险更低，但需要更多代码改动。
 
-## Expected Benefits
+## 预期收益
 
-- More complete dynamic object masks.
-- Less leakage from floor/background into the dynamic component.
-- Cleaner dynamic Gaussian initialization.
-- Potentially better novel-view synthesis on dynamic regions, especially for scenes with clear foreground subjects.
+- 动态主体掩码更完整。
+- 地面和背景泄漏到动态区域的情况减少。
+- 动态 Gaussian 初始化更干净。
+- 对动态区域的新视角合成质量可能提升，尤其是前景主体明确的场景。
 
-## Risks
+## 风险
 
-- SAM3 segments objects, not motion. A prompted static object can be incorrectly treated as dynamic.
-- Missing prompts can miss secondary moving objects or carried objects.
-- Mask errors can harm reconstruction if used as hard ground truth.
-- Occlusion and reappearance still need manual checking or temporal post-processing.
+- SAM3 分割的是物体，不是运动。若 prompt 到静态物体，它也会被当成动态。
+- prompt 不完整时，可能漏掉次要运动物体、手持物或被带动的物体。
+- 如果错误 mask 被当成硬 GT，会直接伤害重建质量。
+- 遮挡和重新出现仍需要人工检查或时序后处理。
 
-## First Experiment
+## 第一轮实验
 
-For DyCheck, generate `dynamic_mask_sam3` for a small set of scenes first:
+先在一小部分 DyCheck 场景上生成 `dynamic_mask_sam3`：
 
 - `apple`
 - `block`
 - `paper-windmill`
 - `space-out`
 
-Then run MoSca with a minimal code path that allows selecting:
+然后给 MoSca 增加一个最小代码路径，使其可以选择：
 
 ```bash
 dynamic_mask_mode=sam3
 ```
 
-Compare against the current origin results using:
+与当前 `origin` 结果对比以下指标：
 
 - `mPSNR`
 - `mSSIM`
 - `mLPIPS`
 - `PCK@0.05`
-- qualitative rendered videos
+- 定性渲染视频
 
-The first implementation should avoid changing camera estimation. It should only affect static/dynamic pixel masks used for Gaussian initialization and photometric reconstruction.
+第一版实现不应该修改相机估计流程，只影响 Gaussian 初始化和 photometric reconstruction 阶段使用的静态/动态像素掩码。

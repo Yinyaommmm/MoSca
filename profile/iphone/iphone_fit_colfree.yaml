@@ -14,6 +14,16 @@ tap_loading_min_valid_cnt: 4
 
 depth_boundary_th: 1.0
 
+# Use scene-local SAM3 masks as dynamic foreground for track filtering and GS init.
+dynamic_mask_dirname: sam3_dymask
+dynamic_mask_required: True
+dynamic_mask_threshold: 0.5
+dynamic_mask_mode: replace
+dynamic_mask_use_for_track_identification: True
+dynamic_mask_track_identification_mode: or
+dynamic_mask_track_identification_cnt: 2
+photo_dynamic_mask_mode: replace
+
 # ! manually set the GT camera and focal lr to zero
 ba_total_steps: 4000
 iso_focal: True

@@ -1,7 +1,9 @@
-exp_name: iphone_fit
+exp_name: iphone_fit_colfree_sam3_trackonly
 mode: iphone
 
 epi_th: 0.00003
+ba_epi_th: 0.0001 # ! higher
+
 dyn_id_cnt: 8
 scf_geo_keyframe_rate: 4
 dep_median: -1.0 # don't normalize for now
@@ -18,17 +20,30 @@ dynamic_mask_required: True
 dynamic_mask_threshold: 0.5
 dynamic_mask_mode: replace
 dynamic_mask_use_for_track_identification: True
-dynamic_mask_track_identification_mode: or
+dynamic_mask_track_identification_mode: only
 dynamic_mask_track_identification_cnt: 2
 photo_dynamic_mask_mode: replace
 
-# ! manually set the GT camera and focal lr to zero
-init_gt_camera: True
-ba_lr_cam_f: 0.0
-ba_lr_dep_c: 0.0
-ba_lr_dep_s: 0.0
-ba_lr_cam_q: 0.0001
-ba_lr_cam_t: 0.0001
+# Colfree setting: camera/depth/focal are optimized instead of initialized from GT camera.
+ba_total_steps: 4000
+iso_focal: True
+init_gt_camera: False
+# ba_lr_cam_f: 0.0
+# ba_lr_dep_c: 0.0
+# ba_lr_dep_s: 0.0
+# ba_lr_cam_q: 0.0001
+# ba_lr_cam_t: 0.0001
+ba_viz_valid_points: False
+init_cam_with_optimal_fov_results: False #True
+ba_lambda_cam_smooth_trans: 0.05
+ba_lambda_cam_smooth_rot: 0.05
+
+ba_fov_search_N: 100
+ba_fov_search_start: 30
+ba_fov_search_end: 60
+
+robust_depth_decay_th: 1.0
+robust_depth_decay_sigma: 0.5
 
 # * mosca init
 mosca_unit_world: 0.02

@@ -8,6 +8,10 @@ from lib_prior.moca_processor import MoCaPrep
 from lib_prior.preprocessor_utils import load_imgs, convert_from_mp4
 from lib_prior.prior_loading import Saved2D, visualize_track
 from lib_prior.moca_processor import mark_dynamic_region
+from lib_prior.dynamic_mask_utils import (
+    combine_dynamic_masks,
+    load_external_dynamic_masks_from_cfg,
+)
 
 from lib_render.render_helper import GS_BACKEND
 
@@ -87,34 +91,41 @@ def preprocess(
 
     TAP_CHUNK_SIZE = getattr(pre_cfg, "tap_chunk_size", 5000)
 
-    moca_processor.process(
-        t_list=None,
-        img_list=img_list,
-        img_name_list=img_fns,
-        save_dir=ws,
-        n_track=getattr(pre_cfg, "n_track_uniform", 8192),
-        # depth crafter
-        depthcrafter_denoising_steps=getattr(
-            pre_cfg, "depthcrafter_denoising_steps", 25
-        ),
-        metric_alignment_frames=getattr(pre_cfg, "metric_alignment_frames", 10),
-        metric_alignment_first_quantil=getattr(
-            pre_cfg, "metric_alignment_first_quantil", 0.7
-        ),
-        metric_alignment_bias_flag=getattr(pre_cfg, "metric_alignment_bias_flag", True),
-        metric_alignment_kernel=getattr(pre_cfg, "metric_alignment_kernel", "cauchy"),
-        metric_alignment_fscale=getattr(pre_cfg, "metric_alignment_fscale", 0.001),
-        # TAP
-        compute_tap=True,
-        tap_chunk_size=TAP_CHUNK_SIZE,
-        # Flow
-        flow_steps=getattr(pre_cfg, "flow_steps", [1, 3]),
-        epi_num_threads=getattr(pre_cfg, "epi_num_threads", 64),
-        # Dep enhance for spatracker
-        boundary_enhance_th=BOUNDARY_EHNAHCE_TH,  # if > 0 will create a sharp dir
-        # boost
-        compute_flow=getattr(pre_cfg, "compute_flow", True),
-    )
+    if getattr(pre_cfg, "skip_uniform_precompute", False):
+        logging.info(
+            "Skip phase-1 uniform preprocessing; reuse existing depth, flow, epi, and uniform TAP files."
+        )
+    else:
+        moca_processor.process(
+            t_list=None,
+            img_list=img_list,
+            img_name_list=img_fns,
+            save_dir=ws,
+            n_track=getattr(pre_cfg, "n_track_uniform", 8192),
+            # depth crafter
+            depthcrafter_denoising_steps=getattr(
+                pre_cfg, "depthcrafter_denoising_steps", 25
+            ),
+            metric_alignment_frames=getattr(pre_cfg, "metric_alignment_frames", 10),
+            metric_alignment_first_quantil=getattr(
+                pre_cfg, "metric_alignment_first_quantil", 0.7
+            ),
+            metric_alignment_bias_flag=getattr(
+                pre_cfg, "metric_alignment_bias_flag", True
+            ),
+            metric_alignment_kernel=getattr(pre_cfg, "metric_alignment_kernel", "cauchy"),
+            metric_alignment_fscale=getattr(pre_cfg, "metric_alignment_fscale", 0.001),
+            # TAP
+            compute_tap=True,
+            tap_chunk_size=TAP_CHUNK_SIZE,
+            # Flow
+            flow_steps=getattr(pre_cfg, "flow_steps", [1, 3]),
+            epi_num_threads=getattr(pre_cfg, "epi_num_threads", 64),
+            # Dep enhance for spatracker
+            boundary_enhance_th=BOUNDARY_EHNAHCE_TH,  # if > 0 will create a sharp dir
+            # boost
+            compute_flow=getattr(pre_cfg, "compute_flow", True),
+        )
 
     if not resample_for_dynamic:
         duration = (time.time() - start_t) / 60.0
@@ -136,6 +147,9 @@ def preprocess(
         .load_vos()
     )
 
+    external_dynamic_mask = load_external_dynamic_masks_from_cfg(
+        ws, s2d, pre_cfg, device=s2d.rgb.device, prefix="precompute_"
+    )
     if hasattr(s2d, "epi"):
         sample_mask = s2d.epi > EPI_TH
     else:
@@ -151,6 +165,16 @@ def preprocess(
             s2d.W,
             0.1,
         )
+    if external_dynamic_mask is not None:
+        mask_mode = getattr(
+            pre_cfg,
+            "precompute_dynamic_mask_mode",
+            getattr(pre_cfg, "dynamic_mask_mode", "replace"),
+        )
+        logging.info(
+            f"Use external dynamic masks for dynamic TAP resampling, mode={mask_mode}"
+        )
+        sample_mask = combine_dynamic_masks(sample_mask, external_dynamic_mask, mask_mode)
     resampling_mask_dilate_ksize = getattr(pre_cfg, "resampling_mask_dilate_ksize", 7)
     sample_mask = (
         torch.nn.functional.max_pool2d(

@@ -14,3 +14,9 @@ epi_num_threads: 64 # Null
 
 align_metric_flag: True
 boundary_enhance_th: -1
+
+# Use scene-local SAM3 masks for dynamic TAP resampling when available.
+dynamic_mask_dirname: sam3_dymask
+dynamic_mask_required: True
+dynamic_mask_threshold: 0.5
+precompute_dynamic_mask_mode: replace
